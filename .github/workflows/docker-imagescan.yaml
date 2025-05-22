@@ -1,0 +1,58 @@
+name: Docker Image Scanning with Snyk
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  snyk-docker-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build Docker image from local Dockerfile
+        run: |
+          docker build -t my-app:latest .
+
+      - name: Install Snyk CLI and snyk-to-html
+        run: npm install -g snyk snyk-to-html
+
+      - name: Authenticate with Snyk
+        run: snyk auth ${{ secrets.SNYK_TOKEN }}
+
+      - name: Snyk container test for vulnerabilities
+        run: |
+          snyk container test my-app:latest --file=Dockerfile --json > snyk-image-report.json || true
+          snyk container test my-app:latest --file=Dockerfile --json | snyk-to-html -o snyk-image-report.html || true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Monitor image in Snyk for tracking over time
+        run: snyk container monitor my-app:latest --file=Dockerfile
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Upload Snyk image scan reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-image-scan-reports
+          path: |
+            snyk-image-report.json
+            snyk-image-report.html
+
+      - name: Show vulnerability summary in logs
+        run: |
+          echo "=== Snyk Image Vulnerability Summary ==="
+          if [ -s snyk-image-report.json ]; then
+            jq -r '.vulnerabilities[] | "\(.severity | ascii_upcase): \(.title) (\(.packageName)@\(.version))"' snyk-image-report.json
+          else
+            echo "✅ No vulnerabilities found or scan failed."
+          fi
