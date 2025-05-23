@@ -1,45 +1,46 @@
-# 🔍 Software Composition Analysis (SCA) in CI/CD Pipeline — Technical Documentation
+# 🛡️ Docker Image Scanning with Snyk — Technical Documentation
 
 ## 1. Context: Why We Are Doing This
 
-In today’s development environment, most applications rely heavily on open-source libraries. Software Composition Analysis (SCA) ensures we can identify and mitigate vulnerabilities in these dependencies, especially transitive ones, early in the software development lifecycle.
+As containerized applications become the standard, it's critical to secure the images used to deploy them. Image scanning ensures vulnerabilities in the base image, dependencies, and libraries are identified **before they reach production**.
 
-This implementation helps to:
+This assignment demonstrates how to:
 
-- Detect known vulnerabilities in direct and transitive dependencies.
-- Ensure compliance with license and security standards.
-- Prevent high-risk components from reaching production.
+- Build a Docker image locally from the project's Dockerfile.
+- Scan the image using **Snyk** to detect vulnerabilities.
+- Monitor and track historical vulnerabilities with `snyk monitor`.
+- Export and upload scan reports as artifacts.
+- Integrate this as a GitHub Actions CI pipeline.
 
 ---
 
 ## 2. Tool Selection & Thought Process
 
-✅ Selected Tool: Snyk (Community Tier)
+✅ **Selected Tool:** Snyk (Community Tier)
 
-We evaluated multiple tools from the assignment list:
-
-| Tool                 | Reason for Rejection/Selection                        |
-|----------------------|------------------------------------------------------|
-| OWASP Dependency Check| Too slow and consumes GitHub Action minutes.         |
-| Mend, Black Duck, JFrog Xray | Paid/Enterprise-oriented, license constraints.   |
-| Snyk                 | Fast, free for small projects, JSON/HTML reporting support. ✅ |
+| Tool         | Reason for Rejection/Selection                                  |
+|--------------|------------------------------------------------------------------|
+| Trivy        | Excellent, but Snyk offers more granular reporting via HTML.     |
+| Clair/Grype  | Good, but more effort needed for HTML report/export.             |
+| Docker Scout | New and limited in reporting customization (Community version).  |
+| **Snyk**     | Easy to use, integrates well with GitHub Actions, supports JSON+HTML reports, and includes `monitor` tracking. ✅ |
 
 **CI Tool Used:** GitHub Actions  
-**Repository Used:** nodejs-goof
+**Dockerfile Location:** Root of the repository
 
 ---
 
-## 3. SCA GitHub Actions Pipeline
+## 3. Docker Image Scanning GitHub Actions Pipeline
 
 ### 🛠️ Trigger Conditions
 
-- On push to `main`  
+- On push to `main`
 - On pull request to `main`
 
-### 🔧 Workflow Configuration (Snyk + SBOM Integration)
+### 🔧 Pipeline Overview
 
 ```yaml
-name: SCA with Snyk + SBOM for nodejs-goof
+name: Docker Image Scanning with Snyk
 
 on:
   push:
@@ -47,168 +48,146 @@ on:
   pull_request:
 
 jobs:
-  sca-scan:
+  snyk-docker-scan:
     runs-on: ubuntu-latest
     permissions:
       contents: read
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3.5.3
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v3.8.1
-        with:
-          node-version: '16'
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
 
-      - name: Install dependencies
-        run: npm install
-
-      - name: Run Snyk test (console output)
-        uses: snyk/actions@master
-        with:
-          command: test
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        continue-on-error: true
+      - name: Build Docker image from local Dockerfile
+        run: |
+          docker build -t my-app:latest .
 
       - name: Install Snyk CLI and snyk-to-html
+        run: npm install -g snyk snyk-to-html
+
+      - name: Authenticate with Snyk
+        run: snyk auth ${{ secrets.SNYK_TOKEN }}
+
+      - name: Snyk container test for vulnerabilities
         run: |
-          npm install -g snyk snyk-to-html
-
-      - name: Generate Snyk HTML and JSON Reports
-        run: |
-          snyk test --json > snyk-report.json || true
-          snyk-to-html -i snyk-report.json -o snyk-report.html || true
-
-          echo "Report files:"
-          ls -lh snyk-report.*
-
-          if [ -s snyk-report.html ]; then
-            echo "✅ HTML report generated"
-          else
-            echo "❌ HTML report was not generated correctly"
-          fi
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        continue-on-error: true
-
-      - name: Monitor project with Snyk
-        run: snyk monitor || true
+          snyk container test my-app:latest --file=Dockerfile --json > snyk-image-report.json || true
+          snyk container test my-app:latest --file=Dockerfile --json | snyk-to-html -o snyk-image-report.html || true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      - name: Upload Snyk reports
+      - name: Monitor image in Snyk for tracking over time
+        run: snyk container monitor my-app:latest --file=Dockerfile
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Upload Snyk image scan reports
         uses: actions/upload-artifact@v4
         with:
-          name: snyk-reports
+          name: snyk-image-scan-reports
           path: |
-            snyk-report.json
-            snyk-report.html
+            snyk-image-report.json
+            snyk-image-report.html
 
-      # --- SBOM Generation and Scan using Docker ---
-
-      - name: Generate SBOM using Syft (CycloneDX JSON)
+      - name: Show vulnerability summary in logs
         run: |
-          docker run --rm -v ${{ github.workspace }}:/project anchore/syft:latest /project -o cyclonedx-json > sbom.json || true
-
-      - name: Scan SBOM with Grype
-        run: |
-          docker run --rm -v ${{ github.workspace }}:/project anchore/grype sbom:/project/sbom.json -o table || true
-
-      - name: Upload SBOM Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbom-json
-          path: sbom.json
-
+          echo "=== Snyk Image Vulnerability Summary ==="
+          if [ -s snyk-image-report.json ]; then
+            jq -r '.vulnerabilities[] | "\(.severity | ascii_upcase): \(.title) (\(.packageName)@\(.version))"' snyk-image-report.json
+          else
+            echo "✅ No vulnerabilities found or scan failed."
 ```
+## Github Action pipeline 
 
-## A: Successful GitHub Actions Run (All Steps Visible)
+![alt text](pipeline-docker.png)
 
-![alt text](<synk-job completion.png>)
+## Artifact Upload Section 
 
-## B: HTML Report Rendered View
+![alt text](<synk artifacts.png>)
 
-![alt text](synk-html.png)
+## Synk Html Report
 
-## C: Uploaded Artifacts Section in GitHub Actions
+![alt text](<synk html.png>)
 
-![alt text](synk-artifacts.png)
+## Synk dashboard view
 
+![alt text](<synk dashboard.png>)
 
 ## 4. Vulnerability Summary
 
 | Severity | Count (approximate) |
 |----------|---------------------|
-| Critical | 10                  |
-| High     | 45                  |
-| Medium   | 38                  |
-| Low      | 30                  |
-| **Total**| **123**             |
+| Critical | 23                   |
+| High     | 159                  |
+| Medium   | 245                  |
+| Low      | 310                   |
+| **Total**| **737**              |
 
-Reports include package name, vulnerable versions, CVE ID, and recommended remediation.
+Reports include:
+
+- Vulnerable packages & versions  
+- Severity level  
+- CVE IDs  
+- Suggested fixes  
 
 ---
 
 ## 5. Recommended Mitigations
 
-- Upgrade vulnerable packages as suggested in the Snyk report.
-- Replace libraries with no patches with maintained alternatives.
-- Regularly scan codebase and enable Snyk PR checks for ongoing coverage.
+- Update base image to a more secure version (e.g., `alpine:3.19+`).
+- Replace packages that do not have security patches.
+- Monitor image regularly using `snyk monitor`.
+- Enable Snyk PR checks to prevent regressions.
 
-📌 **Example**:
+📌 **Example:**
 
 ```json
 {
-  "package": "minimist",
-  "severity": "high",
-  "remediation": "Upgrade to version >=1.2.3"
+  "package": "libcurl",
+  "severity": "critical",
+  "remediation": "Upgrade base image or patch libcurl manually."
 }
 ```
-
 ## 6. Impact Analysis & Challenges
 
 ### ✅ Benefits
 
-- Identifies risks before merge to `main`.
-- JSON + HTML reports enable both automation and manual review.
-- Snyk monitor enables historical vulnerability tracking.
-- SBOM generation supports SBOM-based security compliance (CycloneDX).
-- Dockerized tools reduce setup issues in CI.
-- Non-blocking pipeline — vulnerabilities don’t break builds.
-
----
+- Finds vulnerabilities **before merge**.
+- Enables `snyk monitor` for continuous security insight.
+- JSON + HTML reports for automation and manual review.
+- Docker-native scanning — no need to push to a registry.
+- CI-integrated and fully automated.
 
 ### 🧠 Challenges & Solutions
 
-| Challenge                          | Solution                                                  |
-|-----------------------------------|-----------------------------------------------------------|
-| `snyk` command not found          | Installed globally using `npm install -g snyk`.           |
-| Artifact uploaded but empty       | Handled empty report with validation and `|| true`.       |
-| Pipeline failure due to vulnerabilities | Made Snyk scan non-failing for the assignment demo. |
-| Syft/Grype install errors         | Used Docker-based containers instead of manual binaries.  |
+| Challenge                          | Solution                                                |
+|-----------------------------------|---------------------------------------------------------|
+| `snyk` command not found          | Installed globally using `npm install -g snyk`.         |
+| HTML report empty or not generated| Handled with fallback + validation using `|| true`.     |
+| Pipeline fails on vulnerabilities | Made test steps non-blocking for assignment/demo.       |
+| Docker Hub push not allowed       | Replaced with local image scanning (no registry needed) |
 
 ---
 
 ## 7. Conclusion
 
-SCA with Snyk and SBOM-based scanning in GitHub Actions provides a robust, scalable solution to:
+Integrating Docker image scanning with **Snyk** into GitHub Actions enhances your CI/CD pipeline with strong container security capabilities:
 
-- Automate vulnerability identification and mitigation.
-- Maintain compliance with open-source usage policies.
-- Build security into CI/CD without slowing teams down.
+- Provides fast, continuous vulnerability feedback.
+- Eliminates manual effort via automation.
+- Ensures secure-by-default builds.
+- Produces evidence (artifacts) for compliance and audits.
 
-🚀 This implementation enables secure-by-default development workflows and delivers artifact-based evidence for audit and reporting.
+🚀 This implementation helps enforce **DevSecOps** practices for containerized apps.
 
 ---
 
 ## 🗂️ Additional Files
 
-| File Name                         | Description                              |
-|----------------------------------|------------------------------------------|
-| `.github/workflows/sca-snyk.yml` | CI pipeline with Snyk + SBOM integration |
-| `snyk-report.json`               | JSON vulnerability report                |
-| `snyk-report.html`               | HTML vulnerability summary               |
-| `sbom.json`                      | CycloneDX JSON SBOM report               |
-| `README.md`                      | Instructions and explanation             |
+| File Name                           | Description                                   |
+|------------------------------------|-----------------------------------------------|
+| `.github/workflows/snyk-docker.yml`| CI pipeline for Docker image scanning         |
+| `snyk-image-report.json`           | JSON vulnerability report                     |
+| `snyk-image-report.html`           | HTML vulnerability summary                    |
+| `README.md`                        | Instructions and explanation                  |
